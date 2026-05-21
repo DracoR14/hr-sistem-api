@@ -29,7 +29,8 @@ DB_URL      = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost/evosdb
 if DB_URL.startswith("postgres://"):
     DB_URL = DB_URL.replace("postgres://", "postgresql://", 1)
 
-engine = create_engine(DB_URL, poolclass=QueuePool, pool_size=5, max_overflow=10)
+DB_URL2 = DB_URL.replace("postgresql://", "postgresql+pg8000://").replace("postgres://", "postgresql+pg8000://")
+engine = create_engine(DB_URL2, pool_size=5, max_overflow=10)
 
 # ── App ─────────────────────────────────────────────────────────────────────
 @asynccontextmanager
