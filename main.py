@@ -1,587 +1,603 @@
 """
-EVOS v2.0 — HR Management System
-PC Desktop aplikacija
-- Edit korisnika i licenci
-- Logo firme + EVOS branding
-- Grafikoni u PDF i Excel
-- Poboljšan dizajn
-- Višejezičnost
+EVOS — HR Management System
+Backend API v2.0
+FastAPI + PostgreSQL (SQLAlchemy) + JWT + Licence sistem
 """
 
-import sys, os, json, requests, base64, io
-from datetime import date, datetime
-from pathlib import Path
+from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional
+from datetime import datetime, timedelta, date
+import jwt
+import bcrypt
+import os
+import secrets
+import string
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import QueuePool
+from contextlib import asynccontextmanager
 
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QStackedWidget, QLabel, QPushButton, QTableWidget, QTableWidgetItem,
-    QDialog, QFormLayout, QLineEdit, QDateEdit, QComboBox, QTextEdit,
-    QMessageBox, QHeaderView, QFrame, QTabWidget, QFileDialog, QCheckBox,
-    QListWidget, QListWidgetItem, QInputDialog, QAbstractItemView,
-    QScrollArea, QSizePolicy, QSpinBox
-)
-from PyQt6.QtCore import Qt, QDate, QTimer, QThread, pyqtSignal, QSize
-from PyQt6.QtGui import (
-    QFont, QColor, QPainter, QBrush, QCursor, QPixmap, QImage, QPalette
-)
-from PyQt6.QtCharts import (
-    QChart, QChartView, QBarSeries, QBarSet, QBarCategoryAxis,
-    QValueAxis, QPieSeries, QPieSlice
-)
-from PyQt6.QtPrintSupport import QPrinter, QPrintPreviewDialog
+# ── Config ─────────────────────────────────────────────────────────────────
+SECRET_KEY  = os.getenv("SECRET_KEY", "evos-tajni-kljuc-2026-promijeniti!")
+ALGORITHM   = "HS256"
+TOKEN_HOURS = 24
+DB_URL      = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost/evosdb")
 
-try:
-    import openpyxl
-    from openpyxl.styles import Font as XFont, PatternFill, Alignment, Border, Side
-    from openpyxl.chart import BarChart, PieChart, Reference
-    from openpyxl.chart.series import DataPoint
-    import openpyxl.utils
-    HAS_XL = True
-except ImportError:
-    HAS_XL = False
+if DB_URL.startswith("postgres://"):
+    DB_URL = DB_URL.replace("postgres://", "postgresql://", 1)
 
-try:
-    from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.lib import colors as rlc
-    from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
-        Paragraph, Spacer, Image as RLImage, HRFlowable)
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import cm
-    from reportlab.graphics.shapes import Drawing, Wedge, Rect, String
-    from reportlab.graphics.charts.piecharts import Pie
-    from reportlab.graphics.charts.barcharts import VerticalBarChart
-    from reportlab.graphics import renderPDF
-    HAS_PDF = True
-except ImportError:
-    HAS_PDF = False
+engine = create_engine(DB_URL, poolclass=QueuePool, pool_size=5, max_overflow=10)
 
-# ── Config ─────────────────────────────────────────────────────────────────────
-API_URL    = "https://hr-sistem-api-production.up.railway.app"
-CONFIG_DIR = Path(os.path.expanduser("~")) / "EVOS"
-CONFIG_DIR.mkdir(exist_ok=True)
-CONFIG_FILE = CONFIG_DIR / "config.json"
-LOGO_FILE   = CONFIG_DIR / "logo.png"
+# ── App ─────────────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
 
-# ── Translations ───────────────────────────────────────────────────────────────
-T = {
-    "bs": {
-        "app_name":"EVOS","login_title":"Dobrodošli u EVOS",
-        "login_sub":"Prijavite se da nastavite",
-        "login_user":"Korisničko ime","login_pass":"Lozinka",
-        "login_btn":"Prijava","login_err":"Pogrešno korisničko ime ili lozinka",
-        "logout":"Odjava",
-        "nav_dashboard":"Dashboard","nav_uposlenici":"Uposlenici",
-        "nav_bolovanja":"Bolovanja","nav_odsustva":"Odsustva",
-        "nav_statistike":"Statistike","nav_postavke":"Postavke","nav_licence":"Licence",
-        "up_title":"Uposlenici","up_novi":"+ Novi uposlenik",
-        "bol_title":"Bolovanja","bol_novo":"+ Novo bolovanje",
-        "ods_title":"Odsustva","ods_novo":"+ Novo odsustvo",
-        "stat_title":"Statistike","post_title":"Postavke","lic_title":"Licence",
-        "lic_nova":"+ Nova licenca","lic_edit":"Uredi licencu",
-        "btn_save":"Spremi","btn_cancel":"Odustani","btn_del":"Obriši",
-        "btn_edit":"Uredi","btn_excel":"📊 Excel","btn_pdf":"📄 PDF","btn_print":"🖨 Print",
-        "lbl_search":"Pretraži...","lbl_dept":"Služba","lbl_status":"Status",
-        "lbl_pos":"Pozicija","lbl_hire":"Datum zaposlenja",
-        "lbl_from":"Datum od","lbl_to":"Datum do","lbl_days":"Dana",
-        "lbl_code":"Šifra","lbl_reason":"Razlog","lbl_note":"Napomena",
-        "lbl_type":"Tip","lbl_firm":"Firma","lbl_plan":"Plan",
-        "lbl_expires":"Ističe","lbl_max_emp":"Max uposlenika",
-        "lbl_key":"Licencni ključ","lbl_lang":"Jezik","lbl_emp":"Uposlenik",
-        "lbl_logo":"Logo firme","lbl_upload_logo":"Učitaj logo",
-        "status_active":"Aktivan","status_inactive":"Neaktivan","status_probation":"Na probnom radu",
-        "ods_pending":"Na čekanju","ods_approved":"Odobreno","ods_rejected":"Odbijeno",
-        "ods_approve":"Odobri","ods_reject":"Odbij",
-        "err_required":"Ovo polje je obavezno!","err_dates":"'Do' mora biti >= 'Od'!",
-        "del_confirm":"Jeste li sigurni da želite obrisati?",
-        "conn_err":"Greška konekcije. Provjerite internet vezu.",
-        "lang_bs":"Bosanski","lang_hr":"Hrvatski","lang_sr":"Srpski","lang_en":"English",
-        "report_title":"Izvještaj","report_date":"Datum izvještaja",
-        "report_generated":"Generirao","report_total":"Ukupno dana",
-        "report_by_emp":"Dana bolovanja po uposleniku",
-        "report_by_month":"Trend po mjesecu","report_by_dept":"Po službi",
-    },
-    "hr": {
-        "app_name":"EVOS","login_title":"Dobrodošli u EVOS",
-        "login_sub":"Prijavite se za nastavak",
-        "login_user":"Korisničko ime","login_pass":"Lozinka",
-        "login_btn":"Prijava","login_err":"Pogrešno korisničko ime ili lozinka",
-        "logout":"Odjava",
-        "nav_dashboard":"Pregled","nav_uposlenici":"Zaposlenici",
-        "nav_bolovanja":"Bolovanja","nav_odsustva":"Odsustva",
-        "nav_statistike":"Statistike","nav_postavke":"Postavke","nav_licence":"Licence",
-        "up_title":"Zaposlenici","up_novi":"+ Novi zaposlenik",
-        "bol_title":"Bolovanja","bol_novo":"+ Novo bolovanje",
-        "ods_title":"Odsustva","ods_novo":"+ Novo odsustvo",
-        "stat_title":"Statistike","post_title":"Postavke","lic_title":"Licence",
-        "lic_nova":"+ Nova licenca","lic_edit":"Uredi licencu",
-        "btn_save":"Spremi","btn_cancel":"Odustani","btn_del":"Obriši",
-        "btn_edit":"Uredi","btn_excel":"📊 Excel","btn_pdf":"📄 PDF","btn_print":"🖨 Ispis",
-        "lbl_search":"Pretraži...","lbl_dept":"Odjel","lbl_status":"Status",
-        "lbl_pos":"Radno mjesto","lbl_hire":"Datum zaposlenja",
-        "lbl_from":"Datum od","lbl_to":"Datum do","lbl_days":"Dana",
-        "lbl_code":"Šifra","lbl_reason":"Razlog","lbl_note":"Napomena",
-        "lbl_type":"Vrsta","lbl_firm":"Tvrtka","lbl_plan":"Plan",
-        "lbl_expires":"Ističe","lbl_max_emp":"Maks. zaposlenika",
-        "lbl_key":"Licencni ključ","lbl_lang":"Jezik","lbl_emp":"Zaposlenik",
-        "lbl_logo":"Logo tvrtke","lbl_upload_logo":"Učitaj logo",
-        "status_active":"Aktivan","status_inactive":"Neaktivan","status_probation":"Na probnom radu",
-        "ods_pending":"Na čekanju","ods_approved":"Odobreno","ods_rejected":"Odbijeno",
-        "ods_approve":"Odobri","ods_reject":"Odbij",
-        "err_required":"Ovo polje je obavezno!","err_dates":"'Do' mora biti >= 'Od'!",
-        "del_confirm":"Jeste li sigurni da želite obrisati?",
-        "conn_err":"Greška veze. Provjerite internetsku vezu.",
-        "lang_bs":"Bosanski","lang_hr":"Hrvatski","lang_sr":"Srpski","lang_en":"English",
-        "report_title":"Izvještaj","report_date":"Datum izvještaja",
-        "report_generated":"Generirao","report_total":"Ukupno dana",
-        "report_by_emp":"Dana bolovanja po zaposleniku",
-        "report_by_month":"Trend po mjesecu","report_by_dept":"Po odjelu",
-    },
-    "sr": {
-        "app_name":"EVOS","login_title":"Dobrodošli u EVOS",
-        "login_sub":"Prijavite se da nastavite",
-        "login_user":"Korisničko ime","login_pass":"Lozinka",
-        "login_btn":"Prijava","login_err":"Pogrešno korisničko ime ili lozinka",
-        "logout":"Odjava",
-        "nav_dashboard":"Pregled","nav_uposlenici":"Zaposleni",
-        "nav_bolovanja":"Bolovanja","nav_odsustva":"Odsustva",
-        "nav_statistike":"Statistike","nav_postavke":"Podešavanja","nav_licence":"Licence",
-        "up_title":"Zaposleni","up_novi":"+ Novi zaposleni",
-        "bol_title":"Bolovanja","bol_novo":"+ Novo bolovanje",
-        "ods_title":"Odsustva","ods_novo":"+ Novo odsustvo",
-        "stat_title":"Statistike","post_title":"Podešavanja","lic_title":"Licence",
-        "lic_nova":"+ Nova licenca","lic_edit":"Uredi licencu",
-        "btn_save":"Sačuvaj","btn_cancel":"Odustani","btn_del":"Obriši",
-        "btn_edit":"Uredi","btn_excel":"📊 Excel","btn_pdf":"📄 PDF","btn_print":"🖨 Štampa",
-        "lbl_search":"Pretraži...","lbl_dept":"Služba","lbl_status":"Status",
-        "lbl_pos":"Pozicija","lbl_hire":"Datum zaposlenja",
-        "lbl_from":"Datum od","lbl_to":"Datum do","lbl_days":"Dana",
-        "lbl_code":"Šifra","lbl_reason":"Razlog","lbl_note":"Napomena",
-        "lbl_type":"Tip","lbl_firm":"Firma","lbl_plan":"Plan",
-        "lbl_expires":"Ističe","lbl_max_emp":"Maks. zaposlenih",
-        "lbl_key":"Licencni ključ","lbl_lang":"Jezik","lbl_emp":"Zaposleni",
-        "lbl_logo":"Logo firme","lbl_upload_logo":"Učitaj logo",
-        "status_active":"Aktivan","status_inactive":"Neaktivan","status_probation":"Na probnom radu",
-        "ods_pending":"Na čekanju","ods_approved":"Odobreno","ods_rejected":"Odbijeno",
-        "ods_approve":"Odobri","ods_reject":"Odbij",
-        "err_required":"Ovo polje je obavezno!","err_dates":"'Do' mora biti >= 'Od'!",
-        "del_confirm":"Da li ste sigurni da želite obrisati?",
-        "conn_err":"Greška konekcije. Proverite internet vezu.",
-        "lang_bs":"Bosanski","lang_hr":"Hrvatski","lang_sr":"Srpski","lang_en":"English",
-        "report_title":"Izveštaj","report_date":"Datum izveštaja",
-        "report_generated":"Generisao","report_total":"Ukupno dana",
-        "report_by_emp":"Dana bolovanja po zaposlenom",
-        "report_by_month":"Trend po mesecu","report_by_dept":"Po službi",
-    },
-    "en": {
-        "app_name":"EVOS","login_title":"Welcome to EVOS",
-        "login_sub":"Sign in to continue",
-        "login_user":"Username","login_pass":"Password",
-        "login_btn":"Sign in","login_err":"Incorrect username or password",
-        "logout":"Sign out",
-        "nav_dashboard":"Dashboard","nav_uposlenici":"Employees",
-        "nav_bolovanja":"Sick Leave","nav_odsustva":"Absences",
-        "nav_statistike":"Statistics","nav_postavke":"Settings","nav_licence":"Licenses",
-        "up_title":"Employees","up_novi":"+ New employee",
-        "bol_title":"Sick Leave","bol_novo":"+ New sick leave",
-        "ods_title":"Absences","ods_novo":"+ New absence",
-        "stat_title":"Statistics","post_title":"Settings","lic_title":"Licenses",
-        "lic_nova":"+ New license","lic_edit":"Edit license",
-        "btn_save":"Save","btn_cancel":"Cancel","btn_del":"Delete",
-        "btn_edit":"Edit","btn_excel":"📊 Excel","btn_pdf":"📄 PDF","btn_print":"🖨 Print",
-        "lbl_search":"Search...","lbl_dept":"Department","lbl_status":"Status",
-        "lbl_pos":"Position","lbl_hire":"Hire date",
-        "lbl_from":"From date","lbl_to":"To date","lbl_days":"Days",
-        "lbl_code":"Code","lbl_reason":"Reason","lbl_note":"Note",
-        "lbl_type":"Type","lbl_firm":"Company","lbl_plan":"Plan",
-        "lbl_expires":"Expires","lbl_max_emp":"Max employees",
-        "lbl_key":"License key","lbl_lang":"Language","lbl_emp":"Employee",
-        "lbl_logo":"Company logo","lbl_upload_logo":"Upload logo",
-        "status_active":"Active","status_inactive":"Inactive","status_probation":"Probation",
-        "ods_pending":"Pending","ods_approved":"Approved","ods_rejected":"Rejected",
-        "ods_approve":"Approve","ods_reject":"Reject",
-        "err_required":"This field is required!","err_dates":"'To' must be >= 'From'!",
-        "del_confirm":"Are you sure you want to delete?",
-        "conn_err":"Connection error. Check your internet connection.",
-        "lang_bs":"Bosanski","lang_hr":"Hrvatski","lang_sr":"Srpski","lang_en":"English",
-        "report_title":"Report","report_date":"Report date",
-        "report_generated":"Generated by","report_total":"Total days",
-        "report_by_emp":"Sick days by employee",
-        "report_by_month":"Monthly trend","report_by_dept":"By department",
-    },
-}
+app = FastAPI(title="EVOS API", version="2.0.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+                   allow_methods=["*"], allow_headers=["*"])
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
-class AppState:
-    token = ""; user = {}; lang = "bs"; logo_path = ""
-    @classmethod
-    def tr(cls, key): return T.get(cls.lang, T["bs"]).get(key, key)
-    @classmethod
-    def save(cls):
-        with open(CONFIG_FILE,"w") as f:
-            json.dump({"lang":cls.lang,"token":cls.token,"user":cls.user,"logo":cls.logo_path},f)
-    @classmethod
-    def load(cls):
-        if CONFIG_FILE.exists():
-            try:
-                d=json.loads(CONFIG_FILE.read_text())
-                cls.lang=d.get("lang","bs"); cls.token=d.get("token","")
-                cls.user=d.get("user",{}); cls.logo_path=d.get("logo","")
-            except: pass
+# ── DB Init ──────────────────────────────────────────────────────────────────
+def init_db():
+    with engine.connect() as conn:
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS licence (
+            id SERIAL PRIMARY KEY,
+            kljuc TEXT NOT NULL UNIQUE,
+            firma TEXT NOT NULL,
+            email TEXT,
+            plan TEXT DEFAULT 'basic',
+            max_uposlenici INTEGER DEFAULT 25,
+            datum_pocetka TEXT,
+            datum_isteka TEXT,
+            aktivna BOOLEAN DEFAULT true,
+            napomena TEXT,
+            kreirana TIMESTAMP DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS korisnici (
+            id SERIAL PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            ime TEXT,
+            uloga TEXT DEFAULT 'korisnik',
+            licenca_id INTEGER REFERENCES licence(id),
+            aktivan BOOLEAN DEFAULT true,
+            jezik TEXT DEFAULT 'bs',
+            kreiran TIMESTAMP DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS sluzbe (
+            id SERIAL PRIMARY KEY,
+            naziv TEXT NOT NULL,
+            licenca_id INTEGER REFERENCES licence(id),
+            UNIQUE(naziv, licenca_id)
+        );
+        CREATE TABLE IF NOT EXISTS uposlenici (
+            id SERIAL PRIMARY KEY,
+            ime TEXT NOT NULL, prezime TEXT NOT NULL,
+            email TEXT, sluzba_id INTEGER REFERENCES sluzbe(id),
+            pozicija TEXT, datum_zaposlenja TEXT,
+            status TEXT DEFAULT 'Aktivan',
+            licenca_id INTEGER REFERENCES licence(id)
+        );
+        CREATE TABLE IF NOT EXISTS sifrarnik_bolovanja (
+            id SERIAL PRIMARY KEY,
+            sifra TEXT NOT NULL, naziv TEXT NOT NULL, opis TEXT,
+            licenca_id INTEGER REFERENCES licence(id),
+            UNIQUE(sifra, licenca_id)
+        );
+        CREATE TABLE IF NOT EXISTS tipovi_odsustava (
+            id SERIAL PRIMARY KEY,
+            naziv TEXT NOT NULL, placeno BOOLEAN DEFAULT true,
+            licenca_id INTEGER REFERENCES licence(id),
+            UNIQUE(naziv, licenca_id)
+        );
+        CREATE TABLE IF NOT EXISTS bolovanja (
+            id SERIAL PRIMARY KEY,
+            uposlenik_id INTEGER REFERENCES uposlenici(id),
+            datum_od TEXT, datum_do TEXT, dana INTEGER,
+            sifra TEXT, razlog TEXT, napomena TEXT,
+            kreirao INTEGER REFERENCES korisnici(id),
+            licenca_id INTEGER REFERENCES licence(id),
+            kreirano TIMESTAMP DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS odsustva (
+            id SERIAL PRIMARY KEY,
+            uposlenik_id INTEGER REFERENCES uposlenici(id),
+            tip_id INTEGER REFERENCES tipovi_odsustava(id),
+            datum_od TEXT, datum_do TEXT, dana INTEGER,
+            status TEXT DEFAULT 'Na cekanju', napomena TEXT,
+            kreirao INTEGER REFERENCES korisnici(id),
+            licenca_id INTEGER REFERENCES licence(id),
+            kreirano TIMESTAMP DEFAULT NOW()
+        );
+        """))
 
-S = AppState
+        # Master admin licenca
+        lic = conn.execute(text("SELECT id FROM licence WHERE kljuc='EVOS-MASTER-0000'")).fetchone()
+        if not lic:
+            conn.execute(text("""
+                INSERT INTO licence(kljuc,firma,email,plan,max_uposlenici,datum_pocetka,datum_isteka,aktivna,napomena)
+                VALUES('EVOS-MASTER-0000','EVOS Admin','admin@evos.ba','master',9999,'2026-01-01','2099-12-31',true,'Master admin licenca')
+            """))
+            conn.commit()
+            lic = conn.execute(text("SELECT id FROM licence WHERE kljuc='EVOS-MASTER-0000'")).fetchone()
 
-# ── API ────────────────────────────────────────────────────────────────────────
-class API:
-    @staticmethod
-    def _h(): return {"Authorization":f"Bearer {S.token}","Content-Type":"application/json"}
-    @staticmethod
-    def get(path, params=None):
-        try:
-            r=requests.get(f"{API_URL}{path}",headers=API._h(),params=params,timeout=15)
-            r.raise_for_status(); return r.json()
-        except requests.exceptions.ConnectionError: raise Exception(S.tr("conn_err"))
-        except Exception as e: raise Exception(str(e))
-    @staticmethod
-    def post(path, data):
-        try:
-            r=requests.post(f"{API_URL}{path}",headers=API._h(),json=data,timeout=15)
-            r.raise_for_status(); return r.json()
-        except requests.exceptions.ConnectionError: raise Exception(S.tr("conn_err"))
-        except Exception as e: raise Exception(str(e))
-    @staticmethod
-    def put(path, data):
-        try:
-            r=requests.put(f"{API_URL}{path}",headers=API._h(),json=data,timeout=15)
-            r.raise_for_status(); return r.json()
-        except requests.exceptions.ConnectionError: raise Exception(S.tr("conn_err"))
-        except Exception as e: raise Exception(str(e))
-    @staticmethod
-    def patch(path, data):
-        try:
-            r=requests.patch(f"{API_URL}{path}",headers=API._h(),json=data,timeout=15)
-            r.raise_for_status(); return r.json()
-        except: raise Exception(S.tr("conn_err"))
-    @staticmethod
-    def delete(path):
-        try:
-            r=requests.delete(f"{API_URL}{path}",headers=API._h(),timeout=15)
-            r.raise_for_status(); return r.json()
-        except requests.exceptions.ConnectionError: raise Exception(S.tr("conn_err"))
-        except Exception as e: raise Exception(str(e))
-    @staticmethod
-    def login(username, password):
-        try:
-            r=requests.post(f"{API_URL}/auth/login",data={"username":username,"password":password},timeout=15)
-            if r.status_code==401: return None, S.tr("login_err")
-            r.raise_for_status(); return r.json(), None
-        except requests.exceptions.ConnectionError: return None, S.tr("conn_err")
-        except Exception as e: return None, str(e)
+        lid = lic[0]
+        admin = conn.execute(text("SELECT id FROM korisnici WHERE username='admin'")).fetchone()
+        if not admin:
+            pw = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode()
+            conn.execute(text(
+                "INSERT INTO korisnici(username,password_hash,ime,uloga,licenca_id) VALUES(:u,:p,:i,:r,:l)"),
+                {"u": "admin", "p": pw, "i": "Administrator", "r": "superadmin", "l": lid})
 
-# ── Palette ────────────────────────────────────────────────────────────────────
-P = {
-    "bg":"#0F1117","surface":"#1A1D2E","card":"#222539",
-    "border":"#2E3250","accent":"#4F6EF7","accent2":"#7C3AED",
-    "green":"#22C55E","orange":"#F59E0B","red":"#EF4444",
-    "text":"#F1F5F9","muted":"#94A3B8","hover":"#2E3355",
-}
+        cnt = conn.execute(text("SELECT COUNT(*) FROM sluzbe WHERE licenca_id=:l"), {"l": lid}).fetchone()[0]
+        if cnt == 0:
+            for s in ["IT","HR","Racunovodstvo","Prodaja","Skladiste","Marketing"]:
+                conn.execute(text("INSERT INTO sluzbe(naziv,licenca_id) VALUES(:n,:l)"), {"n": s, "l": lid})
+            for sf in [("B01","Akutna bolest",""),("B02","Operacija",""),("B03","Njega clana porodice",""),
+                        ("B04","Povreda na radu",""),("B05","Hronicna bolest",""),("B09","Ostalo","")]:
+                conn.execute(text("INSERT INTO sifrarnik_bolovanja(sifra,naziv,opis,licenca_id) VALUES(:s,:n,:o,:l)"),
+                             {"s": sf[0], "n": sf[1], "o": sf[2], "l": lid})
+            for tp in [("Godisnji odmor",True),("Placeno odsustvo",True),("Neplaceno odsustvo",False),
+                        ("Sluzbeni put",True),("Obrazovanje",True),("Ostalo",False)]:
+                conn.execute(text("INSERT INTO tipovi_odsustava(naziv,placeno,licenca_id) VALUES(:n,:p,:l)"),
+                             {"n": tp[0], "p": tp[1], "l": lid})
+        conn.commit()
 
-STYLE = f"""
-QMainWindow,QWidget{{background:{P['bg']};color:{P['text']};font-family:'Segoe UI';font-size:13px;}}
-QDialog{{background:{P['surface']};color:{P['text']};}}
-QLabel{{color:{P['text']};}}
-QLineEdit,QTextEdit,QDateEdit,QComboBox,QSpinBox{{
-    background:{P['card']};border:1.5px solid {P['border']};border-radius:8px;
-    padding:8px 12px;color:{P['text']};font-size:13px;}}
-QLineEdit:focus,QTextEdit:focus,QDateEdit:focus,QComboBox:focus,QSpinBox:focus{{border-color:{P['accent']};}}
-QComboBox::drop-down{{border:none;width:28px;}}
-QComboBox QAbstractItemView{{background:{P['card']};border:1px solid {P['border']};
-    selection-background-color:{P['accent']};color:{P['text']};}}
-QTableWidget{{background:{P['surface']};border:none;gridline-color:{P['border']};color:{P['text']};}}
-QTableWidget::item{{padding:6px 12px;border:none;}}
-QTableWidget::item:selected{{background:{P['accent']}33;color:{P['text']};}}
-QTableWidget::item:alternate{{background:{P['card']};}}
-QHeaderView::section{{background:{P['card']};color:{P['muted']};font-size:11px;
-    font-weight:600;letter-spacing:1px;padding:10px 12px;border:none;
-    border-bottom:1.5px solid {P['border']};}}
-QScrollBar:vertical{{background:{P['surface']};width:8px;border-radius:4px;}}
-QScrollBar::handle:vertical{{background:{P['border']};border-radius:4px;min-height:30px;}}
-QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0;}}
-QTabWidget::pane{{border:1.5px solid {P['border']};border-radius:10px;background:{P['surface']};}}
-QTabBar::tab{{background:{P['card']};color:{P['muted']};padding:10px 22px;
-    border-radius:8px 8px 0 0;font-size:13px;font-weight:600;margin-right:3px;}}
-QTabBar::tab:selected{{background:{P['accent']};color:white;}}
-QCheckBox{{color:{P['text']};font-size:13px;spacing:8px;}}
-QCheckBox::indicator{{width:18px;height:18px;border:2px solid {P['border']};border-radius:4px;background:{P['card']};}}
-QCheckBox::indicator:checked{{background:{P['accent']};border-color:{P['accent']};}}
-QListWidget{{background:{P['card']};border:1.5px solid {P['border']};border-radius:8px;color:{P['text']};}}
-QListWidget::item{{padding:8px 12px;border-radius:6px;}}
-QListWidget::item:selected{{background:{P['accent']}33;color:{P['accent']};}}
-"""
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def create_token(data: dict):
+    exp = datetime.utcnow() + timedelta(hours=TOKEN_HOURS)
+    return jwt.encode({**data, "exp": exp}, SECRET_KEY, algorithm=ALGORITHM)
 
-# ── UI Helpers ────────────────────────────────────────────────────────────────
-def card():
-    w=QFrame()
-    w.setStyleSheet(f"QFrame{{background:{P['surface']};border:1.5px solid {P['border']};border-radius:14px;}}")
-    return w
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except:
+        raise HTTPException(status_code=401, detail="Nevalidan token")
 
-def btn_primary(t):
-    b=QPushButton(t)
-    b.setStyleSheet(f"QPushButton{{background:{P['accent']};color:white;border:none;border-radius:8px;padding:9px 20px;font-size:13px;font-weight:600;}}QPushButton:hover{{background:#6B84FF;}}QPushButton:pressed{{background:#3A54D4;}}")
-    b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor)); return b
+def db_exec(sql, params=None):
+    with engine.connect() as conn:
+        result = conn.execute(text(sql), params or {})
+        conn.commit()
+        return result
 
-def btn_ghost(t):
-    b=QPushButton(t)
-    b.setStyleSheet(f"QPushButton{{background:transparent;color:{P['muted']};border:1.5px solid {P['border']};border-radius:8px;padding:9px 16px;font-size:13px;}}QPushButton:hover{{color:{P['text']};border-color:{P['accent']};}}")
-    b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor)); return b
+def db_fetch(sql, params=None):
+    with engine.connect() as conn:
+        result = conn.execute(text(sql), params or {})
+        cols = result.keys()
+        return [dict(zip(cols, row)) for row in result.fetchall()]
 
-def btn_danger(t):
-    b=QPushButton(t)
-    b.setStyleSheet(f"QPushButton{{background:{P['red']}22;color:{P['red']};border:1.5px solid {P['red']}55;border-radius:8px;padding:9px 16px;font-size:13px;font-weight:600;}}QPushButton:hover{{background:{P['red']}44;}}")
-    b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor)); return b
+def db_one(sql, params=None):
+    rows = db_fetch(sql, params)
+    return rows[0] if rows else None
 
-def btn_icon(icon, color=None):
-    c=color or P['muted']; b=QPushButton(icon); b.setFixedSize(34,32)
-    b.setStyleSheet(f"QPushButton{{background:{P['card']};color:{c};border:1px solid {P['border']};border-radius:6px;font-size:14px;}}QPushButton:hover{{background:{P['hover']};border-color:{P['accent']};}}")
-    b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor)); return b
+def gen_licence_key(plan="basic"):
+    chars = string.ascii_uppercase + string.digits
+    parts = [''.join(secrets.choice(chars) for _ in range(4)) for _ in range(3)]
+    prefix = {"basic": "EVOS-B", "pro": "EVOS-P", "enterprise": "EVOS-E", "master": "EVOS-M"}.get(plan, "EVOS-X")
+    return f"{prefix}-{'-'.join(parts)}"
 
-def stat_card(title, value, color, sub=""):
-    f=card(); f.setFixedHeight(110)
-    lay=QVBoxLayout(f); lay.setContentsMargins(20,16,20,16); lay.setSpacing(4)
-    t=QLabel(title); t.setStyleSheet(f"color:{P['muted']};font-size:11px;font-weight:600;letter-spacing:1px;")
-    v=QLabel(str(value)); v.setStyleSheet(f"color:{color};font-size:30px;font-weight:700;")
-    lay.addWidget(t); lay.addWidget(v)
-    if sub:
-        s=QLabel(sub); s.setStyleSheet(f"color:{P['muted']};font-size:11px;"); lay.addWidget(s)
-    return f
+def lid(user):
+    return user.get('licenca_id')
 
-def make_table(cols):
-    t=QTableWidget(); t.setColumnCount(len(cols))
-    t.setHorizontalHeaderLabels(cols)
-    t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-    t.verticalHeader().setVisible(False); t.setAlternatingRowColors(True)
-    t.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-    t.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-    t.verticalHeader().setDefaultSectionSize(46); return t
+# ── Modeli ────────────────────────────────────────────────────────────────────
+class UposlenikIn(BaseModel):
+    ime: str; prezime: str; email: Optional[str]=""
+    sluzba_id: Optional[int]=None; pozicija: Optional[str]=""
+    datum_zaposlenja: Optional[str]=""; status: str="Aktivan"
 
-def titem(v, center=False):
-    it=QTableWidgetItem(str(v) if v is not None else "")
-    it.setTextAlignment(Qt.AlignmentFlag.AlignVCenter|(Qt.AlignmentFlag.AlignCenter if center else Qt.AlignmentFlag.AlignLeft))
-    return it
+class BolovanjeIn(BaseModel):
+    uposlenik_id: int; datum_od: str; datum_do: str; dana: int
+    sifra: str; razlog: Optional[str]=""; napomena: Optional[str]=""
 
-def api_error(parent, e): QMessageBox.warning(parent,"Greška",str(e))
+class OdsustvoIn(BaseModel):
+    uposlenik_id: int; tip_id: int; datum_od: str; datum_do: str
+    dana: int; status: str="Na cekanju"; napomena: Optional[str]=""
 
-QLabel.also = lambda self, fn: (fn(self), self)[1]
+class SluzbaIn(BaseModel):
+    naziv: str
 
-# ── EXPORT SA GRAFIKONIMA ──────────────────────────────────────────────────────
-def export_excel_with_charts(parent, headers, rows, stats, title="Izvjestaj"):
-    if not HAS_XL:
-        QMessageBox.warning(parent,"Greška","pip install openpyxl"); return
-    path,_=QFileDialog.getSaveFileName(parent,"Spremi Excel",str(CONFIG_DIR/f"{title}.xlsx"),"Excel (*.xlsx)")
-    if not path: return
-    wb=openpyxl.Workbook()
+class SifraIn(BaseModel):
+    sifra: str; naziv: str; opis: Optional[str]=""
 
-    # Sheet 1 - Podaci
-    ws=wb.active; ws.title="Podaci"
-    thin=Side(style='thin',color='B0C4DE'); brd=Border(left=thin,right=thin,top=thin,bottom=thin)
-    hf=PatternFill("solid",start_color="2E75B6")
-    for ci,h in enumerate(headers,1):
-        c=ws.cell(1,ci,h); c.font=XFont(bold=True,color="FFFFFF",size=11)
-        c.fill=hf; c.alignment=Alignment(horizontal="center",vertical="center"); c.border=brd
-        ws.column_dimensions[openpyxl.utils.get_column_letter(ci)].width=max(14,len(str(h))+4)
-    af=PatternFill("solid",start_color="D6E4F0")
-    for ri,row in enumerate(rows,2):
-        for ci,v in enumerate(row,1):
-            c=ws.cell(ri,ci,v); c.border=brd; c.alignment=Alignment(vertical="center")
-            if ri%2==0: c.fill=af
+class TipIn(BaseModel):
+    naziv: str; placeno: bool=True
 
-    # Sheet 2 - Grafikoni
-    wc=wb.create_sheet("Grafikoni")
-    wc["A1"]="Analiza bolovanja"; wc["A1"].font=XFont(bold=True,size=14,color="2E75B6")
+class KorisnikIn(BaseModel):
+    username: str; password: str; ime: Optional[str]=""
+    uloga: str="korisnik"; licenca_id: Optional[int]=None
 
-    # Pie chart po uposlenicima
-    by_emp=stats.get("by_emp",[])
-    if by_emp:
-        wc["A3"]="Uposlenik"; wc["B3"]="Dana"
-        wc["A3"].font=XFont(bold=True); wc["B3"].font=XFont(bold=True)
-        for i,row in enumerate(by_emp[:10],4):
-            wc.cell(i,1,row.get("name","")[:20])
-            wc.cell(i,2,row.get("dana",0))
+class KorisnikUpdateIn(BaseModel):
+    ime: Optional[str]=None
+    uloga: Optional[str]=None
+    nova_lozinka: Optional[str]=None
+    aktivan: Optional[bool]=None
 
-        pie=PieChart()
-        pie.title="Dana bolovanja po uposleniku"
-        labels=Reference(wc,min_col=1,min_row=4,max_row=3+min(len(by_emp),10))
-        data=Reference(wc,min_col=2,min_row=3,max_row=3+min(len(by_emp),10))
-        pie.add_data(data,titles_from_data=True)
-        pie.set_categories(labels)
-        pie.style=10; pie.width=18; pie.height=14
-        wc.add_chart(pie,"D3")
+class LicencaIn(BaseModel):
+    firma: str; email: Optional[str]=""
+    plan: str="basic"; max_uposlenici: int=25
+    datum_pocetka: str; datum_isteka: str
+    napomena: Optional[str]=""
 
-    # Bar chart po mjesecima
-    by_month=stats.get("by_month",[])
-    MJ=["Jan","Feb","Mar","Apr","Maj","Jun","Jul","Aug","Sep","Okt","Nov","Dec"]
-    if by_month:
-        start_row=20
-        wc.cell(start_row,1,"Mjesec"); wc.cell(start_row,2,"Dana")
-        mdict={r.get("mj",""):r.get("dana",0) for r in by_month}
-        for i,m in enumerate(MJ,start_row+1):
-            wc.cell(i,1,m); wc.cell(i,2,mdict.get(f"{MJ.index(m)+1:02d}",0))
-        bar=BarChart(); bar.type="col"; bar.title="Trend bolovanja po mjesecu"
-        bar.y_axis.title="Dana"; bar.x_axis.title="Mjesec"
-        data=Reference(wc,min_col=2,min_row=start_row,max_row=start_row+12)
-        cats=Reference(wc,min_col=1,min_row=start_row+1,max_row=start_row+12)
-        bar.add_data(data,titles_from_data=True); bar.set_categories(cats)
-        bar.style=10; bar.width=18; bar.height=12
-        wc.add_chart(bar,"D20")
+class StatusIn(BaseModel):
+    status: str
 
-    wb.save(path)
-    QMessageBox.information(parent,"Uspješno",f"Excel sa grafikonima sačuvan:\n{path}")
+class JezikIn(BaseModel):
+    jezik: str
 
-def export_pdf_with_charts(parent, headers, rows, stats, title="Izvjestaj", firma_naziv=""):
-    if not HAS_PDF:
-        QMessageBox.warning(parent,"Greška","pip install reportlab"); return
-    path,_=QFileDialog.getSaveFileName(parent,"Spremi PDF",str(CONFIG_DIR/f"{title}.pdf"),"PDF (*.pdf)")
-    if not path: return
+# ── ROOT ──────────────────────────────────────────────────────────────────────
+@app.get("/")
+def root():
+    return {"status": "EVOS API radi!", "verzija": "2.0.0"}
 
-    doc=SimpleDocTemplate(path,pagesize=A4,topMargin=1.5*cm,bottomMargin=1.5*cm,
-                          leftMargin=1.5*cm,rightMargin=1.5*cm)
-    styles=getSampleStyleSheet()
-    title_style=ParagraphStyle('Title',fontName='Helvetica-Bold',fontSize=18,
-                               textColor=rlc.HexColor('#2E75B6'),spaceAfter=6)
-    sub_style=ParagraphStyle('Sub',fontName='Helvetica',fontSize=10,
-                             textColor=rlc.HexColor('#94A3B8'),spaceAfter=12)
-    section_style=ParagraphStyle('Section',fontName='Helvetica-Bold',fontSize=13,
-                                 textColor=rlc.HexColor('#1A1D2E'),spaceAfter=8,spaceBefore=16)
-    elems=[]
+# ── AUTH ──────────────────────────────────────────────────────────────────────
+@app.post("/auth/login")
+def login(form: OAuth2PasswordRequestForm = Depends()):
+    user = db_one("SELECT * FROM korisnici WHERE username=:u AND aktivan=true", {"u": form.username})
+    if not user or not bcrypt.checkpw(form.password.encode(), user['password_hash'].encode()):
+        raise HTTPException(status_code=401, detail="Pogresno korisnicko ime ili lozinka")
 
-    # Header sa logom
-    header_data=[[]]
-    if S.logo_path and os.path.exists(S.logo_path):
-        try:
-            img=RLImage(S.logo_path,width=3*cm,height=2*cm)
-            header_data=[[img, Paragraph(f"<b>{firma_naziv or 'EVOS'}</b>", title_style)]]
-        except:
-            header_data=[[Paragraph(f"<b>{firma_naziv or 'EVOS'}</b>",title_style)]]
-    else:
-        header_data=[[Paragraph(f"<b>EVOS</b>",title_style)]]
+    if user['uloga'] != 'superadmin' and user.get('licenca_id'):
+        lic = db_one("SELECT * FROM licence WHERE id=:l", {"l": user['licenca_id']})
+        if not lic or not lic['aktivna']:
+            raise HTTPException(status_code=403, detail="Licenca nije aktivna")
+        if lic['datum_isteka'] < date.today().isoformat():
+            raise HTTPException(status_code=403, detail="Licenca je istekla")
 
-    if len(header_data[0])>1:
-        ht=Table(header_data,colWidths=[4*cm,None])
-        ht.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ALIGN',(0,0),(0,0),'LEFT')]))
-        elems.append(ht)
-    else:
-        elems.append(Paragraph("EVOS — HR Management System",title_style))
+    token = create_token({
+        "sub": user['username'], "id": user['id'],
+        "uloga": user['uloga'], "ime": user['ime'] or "",
+        "licenca_id": user.get('licenca_id'), "jezik": user.get('jezik','bs')
+    })
+    return {"access_token": token, "token_type": "bearer",
+            "uloga": user['uloga'], "ime": user['ime'] or "",
+            "jezik": user.get('jezik','bs'), "licenca_id": user.get('licenca_id')}
 
-    elems.append(Paragraph(f"{title}",title_style))
-    elems.append(Paragraph(f"{S.tr('report_date')}: {date.today().strftime('%d.%m.%Y.')}  |  {S.tr('report_generated')}: {S.user.get('ime','')}",sub_style))
-    elems.append(HRFlowable(width="100%",thickness=1,color=rlc.HexColor('#2E75B6'),spaceAfter=12))
+@app.get("/auth/me")
+def me(user=Depends(get_current_user)):
+    return user
 
-    # Tabela podataka
-    elems.append(Paragraph(S.tr("report_title"),section_style))
-    data=[headers]+[[str(v) if v is not None else "" for v in r] for r in rows]
-    cw=(A4[0]-3*cm)/len(headers)
-    tbl=Table(data,colWidths=[cw]*len(headers))
-    tbl.setStyle(TableStyle([
-        ('BACKGROUND',(0,0),(-1,0),rlc.HexColor('#2E75B6')),
-        ('TEXTCOLOR',(0,0),(-1,0),rlc.white),
-        ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,0),9),
-        ('ALIGN',(0,0),(-1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'MIDDLE'),
-        ('ROWBACKGROUNDS',(0,1),(-1,-1),[rlc.white,rlc.HexColor('#EEF2FF')]),
-        ('GRID',(0,0),(-1,-1),0.5,rlc.HexColor('#B0C4DE')),
-        ('FONTSIZE',(0,1),(-1,-1),8),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),
-    ]))
-    elems.append(tbl)
+@app.put("/auth/jezik")
+def set_jezik(data: JezikIn, user=Depends(get_current_user)):
+    db_exec("UPDATE korisnici SET jezik=:j WHERE id=:i", {"j": data.jezik, "i": user['id']})
+    return {"ok": True}
 
-    # Pie chart - bolovanja po uposleniku
-    by_emp=stats.get("by_emp",[])
-    if by_emp:
-        elems.append(Paragraph(S.tr("report_by_emp"),section_style))
-        COLORS_PIE=["#4F6EF7","#7C3AED","#22C55E","#F59E0B","#EF4444","#06B6D4","#EC4899","#84CC16","#F97316","#14B8A6"]
-        d=Drawing(400,200)
-        pie=Pie()
-        pie.x=50; pie.y=20; pie.width=160; pie.height=160
-        vals=[r.get("dana",0) for r in by_emp[:8] if r.get("dana",0)>0]
-        lbls=[f"{r.get('name','')[:12]} ({r.get('dana',0)}d)" for r in by_emp[:8] if r.get("dana",0)>0]
-        if vals:
-            pie.data=vals; pie.labels=lbls
-            pie.sideLabels=True
-            for i,c in enumerate(COLORS_PIE[:len(vals)]):
-                pie.slices[i].fillColor=rlc.HexColor(c)
-                pie.slices[i].strokeColor=rlc.white
-                pie.slices[i].strokeWidth=1
-            d.add(pie)
-            elems.append(d)
+# ── LICENCE ─────────────────────────────────────────────────────────────────
+@app.get("/licence")
+def get_licence(user=Depends(get_current_user)):
+    if user['uloga'] != 'superadmin':
+        raise HTTPException(403, "Nemate pristup")
+    return db_fetch("SELECT * FROM licence ORDER BY kreirana DESC")
 
-    # Bar chart - trend po mjesecu
-    by_month=stats.get("by_month",[])
-    if by_month:
-        elems.append(Paragraph(S.tr("report_by_month"),section_style))
-        MJ=["Jan","Feb","Mar","Apr","Maj","Jun","Jul","Aug","Sep","Okt","Nov","Dec"]
-        mdict={r.get("mj",""):r.get("dana",0) for r in by_month}
-        month_vals=[mdict.get(f"{i+1:02d}",0) for i in range(12)]
-        if any(v>0 for v in month_vals):
-            d2=Drawing(500,150)
-            bc=VerticalBarChart()
-            bc.x=50; bc.y=10; bc.height=120; bc.width=420
-            bc.data=[month_vals]
-            bc.categoryAxis.categoryNames=MJ
-            bc.bars[0].fillColor=rlc.HexColor('#4F6EF7')
-            bc.bars[0].strokeColor=rlc.HexColor('#3A54D4')
-            bc.valueAxis.valueMin=0
-            bc.categoryAxis.labels.angle=30
-            bc.categoryAxis.labels.fontSize=8
-            bc.valueAxis.labels.fontSize=8
-            d2.add(bc)
-            elems.append(d2)
+@app.post("/licence")
+def create_licenca(data: LicencaIn, user=Depends(get_current_user)):
+    if user['uloga'] != 'superadmin':
+        raise HTTPException(403, "Nemate pristup")
+    kljuc = gen_licence_key(data.plan)
+    db_exec("""INSERT INTO licence(kljuc,firma,email,plan,max_uposlenici,datum_pocetka,datum_isteka,aktivna,napomena)
+               VALUES(:k,:f,:e,:p,:m,:od,:do,true,:n)""",
+            {"k": kljuc, "f": data.firma, "e": data.email, "p": data.plan,
+             "m": data.max_uposlenici, "od": data.datum_pocetka, "do": data.datum_isteka, "n": data.napomena})
+    lic = db_one("SELECT * FROM licence WHERE kljuc=:k", {"k": kljuc})
+    lid_new = lic['id']
+    for s in ["IT","HR","Racunovodstvo","Prodaja","Skladiste","Ostalo"]:
+        db_exec("INSERT INTO sluzbe(naziv,licenca_id) VALUES(:n,:l) ON CONFLICT DO NOTHING", {"n": s, "l": lid_new})
+    for sf in [("B01","Akutna bolest"),("B02","Operacija"),("B03","Njega clana porodice"),
+                ("B04","Povreda na radu"),("B05","Hronicna bolest"),("B09","Ostalo")]:
+        db_exec("INSERT INTO sifrarnik_bolovanja(sifra,naziv,opis,licenca_id) VALUES(:s,:n,:o,:l) ON CONFLICT DO NOTHING",
+                {"s": sf[0], "n": sf[1], "o": "", "l": lid_new})
+    for tp in [("Godisnji odmor",True),("Placeno odsustvo",True),("Sluzbeni put",True),
+                ("Neplaceno odsustvo",False),("Ostalo",False)]:
+        db_exec("INSERT INTO tipovi_odsustava(naziv,placeno,licenca_id) VALUES(:n,:p,:l) ON CONFLICT DO NOTHING",
+                {"n": tp[0], "p": tp[1], "l": lid_new})
+    return {"ok": True, "kljuc": kljuc, "licenca": lic}
 
-    doc.build(elems)
-    QMessageBox.information(parent,"Uspješno",f"PDF sa grafikonima sačuvan:\n{path}")
+@app.put("/licence/{lid_id}/toggle")
+def toggle_licenca(lid_id: int, user=Depends(get_current_user)):
+    if user['uloga'] != 'superadmin':
+        raise HTTPException(403, "Nemate pristup")
+    db_exec("UPDATE licence SET aktivna = NOT aktivna WHERE id=:l", {"l": lid_id})
+    return {"ok": True}
 
-def do_print(parent, headers, rows, title="Izvjestaj"):
-    printer=QPrinter(QPrinter.PrinterMode.HighResolution)
-    dlg=QPrintPreviewDialog(printer,parent)
-    def render(p):
-        painter=QPainter(p)
-        pw=p.pageRect(QPrinter.Unit.DevicePixel).width()
-        ph=p.pageRect(QPrinter.Unit.DevicePixel).height()
-        y=80
-        # Logo
-        if S.logo_path and os.path.exists(S.logo_path):
-            pix=QPixmap(S.logo_path).scaled(120,60,Qt.AspectRatioMode.KeepAspectRatio)
-            painter.drawPixmap(40,20,pix)
-            y=100
-        painter.setFont(QFont("Segoe UI",14,QFont.Weight.Bold))
-        painter.setPen(QColor(P['text'])); painter.drawText(40,y,title); y+=36
-        painter.setFont(QFont("Segoe UI",9))
-        painter.setPen(QColor(P['muted']))
-        painter.drawText(40,y,f"Datum: {date.today().strftime('%d.%m.%Y.')}"); y+=36
-        cw=int((pw-80)/max(len(headers),1))
-        painter.fillRect(40,y-20,int(pw-80),30,QColor("#2E7
-        # Dodati u main.py na GitHubu - PUT endpoint za korisnike
-# Zamijeniti postojeci @app.delete("/korisnici/{kid}") sa ovim:
-@app.put("/korisnici/{kid}")
-def update_korisnik(kid: int, request: Request, user=Depends(get_current_user)):
+@app.delete("/licence/{lid_id}")
+def del_licenca(lid_id: int, user=Depends(get_current_user)):
+    if user['uloga'] != 'superadmin':
+        raise HTTPException(403, "Nemate pristup")
+    db_exec("UPDATE licence SET aktivna=false WHERE id=:l", {"l": lid_id})
+    return {"ok": True}
+
+@app.get("/licence/provjeri/{kljuc}")
+def provjeri_licencu(kljuc: str):
+    lic = db_one("SELECT * FROM licence WHERE kljuc=:k", {"k": kljuc})
+    if not lic:
+        return {"validna": False, "poruka": "Licenca ne postoji"}
+    if not lic['aktivna']:
+        return {"validna": False, "poruka": "Licenca nije aktivna"}
+    if lic['datum_isteka'] < date.today().isoformat():
+        return {"validna": False, "poruka": "Licenca je istekla"}
+    return {"validna": True, "firma": lic['firma'], "plan": lic['plan'],
+            "max_uposlenici": lic['max_uposlenici'], "istice": lic['datum_isteka']}
+
+# ── KORISNICI ─────────────────────────────────────────────────────────────────
+@app.get("/korisnici")
+def get_korisnici(user=Depends(get_current_user)):
     if user['uloga'] not in ('superadmin', 'admin'):
         raise HTTPException(403, "Nemate pristup")
-    import json
-    data = {}
+    if user['uloga'] == 'superadmin':
+        return db_fetch("SELECT id,username,ime,uloga,licenca_id,aktivan,jezik FROM korisnici ORDER BY username")
+    return db_fetch("SELECT id,username,ime,uloga,licenca_id,aktivan,jezik FROM korisnici WHERE licenca_id=:l ORDER BY username",
+                    {"l": lid(user)})
+
+@app.post("/korisnici")
+def add_korisnik(data: KorisnikIn, user=Depends(get_current_user)):
+    if user['uloga'] not in ('superadmin', 'admin'):
+        raise HTTPException(403, "Nemate pristup")
+    l = data.licenca_id if user['uloga'] == 'superadmin' else lid(user)
+    pw = bcrypt.hashpw(data.password.encode(), bcrypt.gensalt()).decode()
     try:
-        data = json.loads(request._body.decode()) if hasattr(request, '_body') else {}
+        db_exec("INSERT INTO korisnici(username,password_hash,ime,uloga,licenca_id) VALUES(:u,:p,:i,:r,:l)",
+                {"u": data.username, "p": pw, "i": data.ime, "r": data.uloga, "l": l})
+        return {"ok": True}
     except:
-        pass
-    if 'ime' in data:
-        db_exec("UPDATE korisnici SET ime=:i WHERE id=:k", {"i": data['ime'], "k": kid})
-    if 'uloga' in data and user['uloga'] == 'superadmin':
-        db_exec("UPDATE korisnici SET uloga=:u WHERE id=:k", {"u": data['uloga'], "k": kid})
-    if 'nova_lozinka' in data and data['nova_lozinka']:
-        import bcrypt
-        pw = bcrypt.hashpw(data['nova_lozinka'].encode(), bcrypt.gensalt()).decode()
+        raise HTTPException(400, "Korisnicko ime vec postoji")
+
+@app.put("/korisnici/{kid}")
+def update_korisnik(kid: int, data: KorisnikUpdateIn, user=Depends(get_current_user)):
+    if user['uloga'] not in ('superadmin', 'admin'):
+        raise HTTPException(403, "Nemate pristup")
+    if data.ime is not None:
+        db_exec("UPDATE korisnici SET ime=:i WHERE id=:k", {"i": data.ime, "k": kid})
+    if data.uloga is not None and user['uloga'] == 'superadmin':
+        db_exec("UPDATE korisnici SET uloga=:u WHERE id=:k", {"u": data.uloga, "k": kid})
+    if data.nova_lozinka:
+        pw = bcrypt.hashpw(data.nova_lozinka.encode(), bcrypt.gensalt()).decode()
         db_exec("UPDATE korisnici SET password_hash=:p WHERE id=:k", {"p": pw, "k": kid})
-    if 'aktivan' in data:
-        db_exec("UPDATE korisnici SET aktivan=:a WHERE id=:k", {"a": 1 if data['aktivan'] else 0, "k": kid})
+    if data.aktivan is not None:
+        db_exec("UPDATE korisnici SET aktivan=:a WHERE id=:k", {"a": data.aktivan, "k": kid})
     return {"ok": True}
 
 @app.delete("/korisnici/{kid}")
-def del_korisnik(kid: int, request: Request, user=Depends(get_current_user)):
+def del_korisnik(kid: int, user=Depends(get_current_user)):
     if user['uloga'] not in ('superadmin', 'admin'):
         raise HTTPException(403, "Nemate pristup")
-    db_exec("UPDATE korisnici SET aktivan=0 WHERE id=:k", {"k": kid})
+    db_exec("UPDATE korisnici SET aktivan=false WHERE id=:k", {"k": kid})
     return {"ok": True}
+
+# ── SLUZBE ────────────────────────────────────────────────────────────────────
+@app.get("/sluzbe")
+def get_sluzbe(user=Depends(get_current_user)):
+    return db_fetch("SELECT s.*,(SELECT COUNT(*) FROM uposlenici WHERE sluzba_id=s.id) as cnt FROM sluzbe s WHERE licenca_id=:l ORDER BY naziv", {"l": lid(user)})
+
+@app.post("/sluzbe")
+def add_sluzba(data: SluzbaIn, user=Depends(get_current_user)):
+    try:
+        db_exec("INSERT INTO sluzbe(naziv,licenca_id) VALUES(:n,:l)", {"n": data.naziv, "l": lid(user)})
+        return {"ok": True}
+    except:
+        raise HTTPException(400, "Naziv vec postoji")
+
+@app.put("/sluzbe/{sid}")
+def update_sluzba(sid: int, data: SluzbaIn, user=Depends(get_current_user)):
+    db_exec("UPDATE sluzbe SET naziv=:n WHERE id=:s AND licenca_id=:l", {"n": data.naziv, "s": sid, "l": lid(user)})
+    return {"ok": True}
+
+@app.delete("/sluzbe/{sid}")
+def del_sluzba(sid: int, user=Depends(get_current_user)):
+    cnt = db_one("SELECT COUNT(*) as c FROM uposlenici WHERE sluzba_id=:s", {"s": sid})['c']
+    if cnt > 0:
+        raise HTTPException(400, f"Sluzba ima {cnt} uposlenika")
+    db_exec("DELETE FROM sluzbe WHERE id=:s AND licenca_id=:l", {"s": sid, "l": lid(user)})
+    return {"ok": True}
+
+# ── UPOSLENICI ────────────────────────────────────────────────────────────────
+@app.get("/uposlenici")
+def get_uposlenici(user=Depends(get_current_user), q: str=""):
+    if q:
+        return db_fetch("""SELECT u.*,s.naziv as sluzba_naziv FROM uposlenici u
+            LEFT JOIN sluzbe s ON u.sluzba_id=s.id
+            WHERE u.licenca_id=:l AND (u.ime||' '||u.prezime) ILIKE :q ORDER BY u.ime""",
+            {"l": lid(user), "q": f"%{q}%"})
+    return db_fetch("""SELECT u.*,s.naziv as sluzba_naziv FROM uposlenici u
+        LEFT JOIN sluzbe s ON u.sluzba_id=s.id WHERE u.licenca_id=:l ORDER BY u.ime""", {"l": lid(user)})
+
+@app.post("/uposlenici")
+def add_uposlenik(data: UposlenikIn, user=Depends(get_current_user)):
+    cnt = db_one("SELECT COUNT(*) as c FROM uposlenici WHERE licenca_id=:l AND status='Aktivan'", {"l": lid(user)})['c']
+    lic_data = db_one("SELECT max_uposlenici FROM licence WHERE id=:l", {"l": lid(user)})
+    if lic_data and cnt >= lic_data['max_uposlenici']:
+        raise HTTPException(400, f"Dostigli ste maksimum od {lic_data['max_uposlenici']} uposlenika")
+    db_exec("""INSERT INTO uposlenici(ime,prezime,email,sluzba_id,pozicija,datum_zaposlenja,status,licenca_id)
+               VALUES(:im,:pr,:em,:sl,:po,:da,:st,:l)""",
+            {"im": data.ime, "pr": data.prezime, "em": data.email, "sl": data.sluzba_id,
+             "po": data.pozicija, "da": data.datum_zaposlenja, "st": data.status, "l": lid(user)})
+    return {"ok": True}
+
+@app.put("/uposlenici/{uid}")
+def update_uposlenik(uid: int, data: UposlenikIn, user=Depends(get_current_user)):
+    db_exec("""UPDATE uposlenici SET ime=:im,prezime=:pr,email=:em,sluzba_id=:sl,
+               pozicija=:po,datum_zaposlenja=:da,status=:st WHERE id=:uid AND licenca_id=:l""",
+            {"im": data.ime, "pr": data.prezime, "em": data.email, "sl": data.sluzba_id,
+             "po": data.pozicija, "da": data.datum_zaposlenja, "st": data.status, "uid": uid, "l": lid(user)})
+    return {"ok": True}
+
+@app.delete("/uposlenici/{uid}")
+def del_uposlenik(uid: int, user=Depends(get_current_user)):
+    db_exec("DELETE FROM uposlenici WHERE id=:uid AND licenca_id=:l", {"uid": uid, "l": lid(user)})
+    return {"ok": True}
+
+# ── SIFRARNIK ─────────────────────────────────────────────────────────────────
+@app.get("/sifrarnik")
+def get_sifrarnik(user=Depends(get_current_user)):
+    return db_fetch("SELECT * FROM sifrarnik_bolovanja WHERE licenca_id=:l ORDER BY sifra", {"l": lid(user)})
+
+@app.post("/sifrarnik")
+def add_sifra(data: SifraIn, user=Depends(get_current_user)):
+    try:
+        db_exec("INSERT INTO sifrarnik_bolovanja(sifra,naziv,opis,licenca_id) VALUES(:s,:n,:o,:l)",
+                {"s": data.sifra.upper(), "n": data.naziv, "o": data.opis, "l": lid(user)})
+        return {"ok": True}
+    except:
+        raise HTTPException(400, "Sifra vec postoji")
+
+@app.put("/sifrarnik/{sid}")
+def update_sifra(sid: int, data: SifraIn, user=Depends(get_current_user)):
+    db_exec("UPDATE sifrarnik_bolovanja SET sifra=:s,naziv=:n,opis=:o WHERE id=:sid AND licenca_id=:l",
+            {"s": data.sifra.upper(), "n": data.naziv, "o": data.opis, "sid": sid, "l": lid(user)})
+    return {"ok": True}
+
+@app.delete("/sifrarnik/{sid}")
+def del_sifra(sid: int, user=Depends(get_current_user)):
+    sifra = db_one("SELECT sifra FROM sifrarnik_bolovanja WHERE id=:s", {"s": sid})
+    if sifra:
+        cnt = db_one("SELECT COUNT(*) as c FROM bolovanja WHERE sifra=:sf AND licenca_id=:l",
+                     {"sf": sifra['sifra'], "l": lid(user)})['c']
+        if cnt > 0:
+            raise HTTPException(400, f"Sifra se koristi u {cnt} bolovanja")
+    db_exec("DELETE FROM sifrarnik_bolovanja WHERE id=:s AND licenca_id=:l", {"s": sid, "l": lid(user)})
+    return {"ok": True}
+
+# ── TIPOVI ODSUSTAVA ──────────────────────────────────────────────────────────
+@app.get("/tipovi-odsustava")
+def get_tipovi(user=Depends(get_current_user)):
+    return db_fetch("SELECT * FROM tipovi_odsustava WHERE licenca_id=:l ORDER BY naziv", {"l": lid(user)})
+
+@app.post("/tipovi-odsustava")
+def add_tip(data: TipIn, user=Depends(get_current_user)):
+    try:
+        db_exec("INSERT INTO tipovi_odsustava(naziv,placeno,licenca_id) VALUES(:n,:p,:l)",
+                {"n": data.naziv, "p": data.placeno, "l": lid(user)})
+        return {"ok": True}
+    except:
+        raise HTTPException(400, "Naziv vec postoji")
+
+@app.put("/tipovi-odsustava/{tid}")
+def update_tip(tid: int, data: TipIn, user=Depends(get_current_user)):
+    db_exec("UPDATE tipovi_odsustava SET naziv=:n,placeno=:p WHERE id=:t AND licenca_id=:l",
+            {"n": data.naziv, "p": data.placeno, "t": tid, "l": lid(user)})
+    return {"ok": True}
+
+@app.delete("/tipovi-odsustava/{tid}")
+def del_tip(tid: int, user=Depends(get_current_user)):
+    cnt = db_one("SELECT COUNT(*) as c FROM odsustva WHERE tip_id=:t", {"t": tid})['c']
+    if cnt > 0:
+        raise HTTPException(400, f"Tip se koristi u {cnt} odsustva")
+    db_exec("DELETE FROM tipovi_odsustava WHERE id=:t AND licenca_id=:l", {"t": tid, "l": lid(user)})
+    return {"ok": True}
+
+# ── BOLOVANJA ─────────────────────────────────────────────────────────────────
+@app.get("/bolovanja")
+def get_bolovanja(user=Depends(get_current_user), q: str="", sifra: str=""):
+    sql = """SELECT b.*,u.ime||' '||u.prezime as uposlenik_name,s.naziv as sluzba
+             FROM bolovanja b JOIN uposlenici u ON b.uposlenik_id=u.id
+             LEFT JOIN sluzbe s ON u.sluzba_id=s.id WHERE b.licenca_id=:l"""
+    params = {"l": lid(user)}
+    if q:
+        sql += " AND (u.ime||' '||u.prezime) ILIKE :q"; params["q"] = f"%{q}%"
+    if sifra:
+        sql += " AND b.sifra=:sf"; params["sf"] = sifra
+    return db_fetch(sql + " ORDER BY b.datum_od DESC", params)
+
+@app.post("/bolovanja")
+def add_bolovanje(data: BolovanjeIn, user=Depends(get_current_user)):
+    db_exec("""INSERT INTO bolovanja(uposlenik_id,datum_od,datum_do,dana,sifra,razlog,napomena,kreirao,licenca_id)
+               VALUES(:ui,:od,:do,:da,:sf,:ra,:na,:kr,:l)""",
+            {"ui": data.uposlenik_id, "od": data.datum_od, "do": data.datum_do, "da": data.dana,
+             "sf": data.sifra, "ra": data.razlog, "na": data.napomena, "kr": user['id'], "l": lid(user)})
+    return {"ok": True}
+
+@app.put("/bolovanja/{bid}")
+def update_bolovanje(bid: int, data: BolovanjeIn, user=Depends(get_current_user)):
+    db_exec("""UPDATE bolovanja SET uposlenik_id=:ui,datum_od=:od,datum_do=:do,dana=:da,
+               sifra=:sf,razlog=:ra,napomena=:na WHERE id=:bid AND licenca_id=:l""",
+            {"ui": data.uposlenik_id, "od": data.datum_od, "do": data.datum_do, "da": data.dana,
+             "sf": data.sifra, "ra": data.razlog, "na": data.napomena, "bid": bid, "l": lid(user)})
+    return {"ok": True}
+
+@app.delete("/bolovanja/{bid}")
+def del_bolovanje(bid: int, user=Depends(get_current_user)):
+    db_exec("DELETE FROM bolovanja WHERE id=:bid AND licenca_id=:l", {"bid": bid, "l": lid(user)})
+    return {"ok": True}
+
+# ── ODSUSTVA ──────────────────────────────────────────────────────────────────
+@app.get("/odsustva")
+def get_odsustva(user=Depends(get_current_user), tip_id: int=0, status_filter: str=""):
+    sql = """SELECT o.*,u.ime||' '||u.prezime as uposlenik_name,t.naziv as tip_naziv
+             FROM odsustva o JOIN uposlenici u ON o.uposlenik_id=u.id
+             JOIN tipovi_odsustava t ON o.tip_id=t.id WHERE o.licenca_id=:l"""
+    params = {"l": lid(user)}
+    if tip_id:
+        sql += " AND o.tip_id=:t"; params["t"] = tip_id
+    if status_filter:
+        sql += " AND o.status=:st"; params["st"] = status_filter
+    return db_fetch(sql + " ORDER BY o.datum_od DESC", params)
+
+@app.post("/odsustva")
+def add_odsustvo(data: OdsustvoIn, user=Depends(get_current_user)):
+    db_exec("""INSERT INTO odsustva(uposlenik_id,tip_id,datum_od,datum_do,dana,status,napomena,kreirao,licenca_id)
+               VALUES(:ui,:ti,:od,:do,:da,:st,:na,:kr,:l)""",
+            {"ui": data.uposlenik_id, "ti": data.tip_id, "od": data.datum_od, "do": data.datum_do,
+             "da": data.dana, "st": data.status, "na": data.napomena, "kr": user['id'], "l": lid(user)})
+    return {"ok": True}
+
+@app.put("/odsustva/{oid}")
+def update_odsustvo(oid: int, data: OdsustvoIn, user=Depends(get_current_user)):
+    db_exec("""UPDATE odsustva SET uposlenik_id=:ui,tip_id=:ti,datum_od=:od,datum_do=:do,
+               dana=:da,status=:st,napomena=:na WHERE id=:oid AND licenca_id=:l""",
+            {"ui": data.uposlenik_id, "ti": data.tip_id, "od": data.datum_od, "do": data.datum_do,
+             "da": data.dana, "st": data.status, "na": data.napomena, "oid": oid, "l": lid(user)})
+    return {"ok": True}
+
+@app.patch("/odsustva/{oid}/status")
+def patch_status(oid: int, data: StatusIn, user=Depends(get_current_user)):
+    db_exec("UPDATE odsustva SET status=:st WHERE id=:oid AND licenca_id=:l",
+            {"st": data.status, "oid": oid, "l": lid(user)})
+    return {"ok": True}
+
+@app.delete("/odsustva/{oid}")
+def del_odsustvo(oid: int, user=Depends(get_current_user)):
+    db_exec("DELETE FROM odsustva WHERE id=:oid AND licenca_id=:l", {"oid": oid, "l": lid(user)})
+    return {"ok": True}
+
+# ── STATISTIKE ────────────────────────────────────────────────────────────────
+@app.get("/statistike/dashboard")
+def dashboard_stats(user=Depends(get_current_user)):
+    l = lid(user)
+    uposlenici = db_one("SELECT COUNT(*) as c FROM uposlenici WHERE licenca_id=:l AND status='Aktivan'", {"l": l})['c']
+    bolovanja  = db_one("SELECT COUNT(*) as c FROM bolovanja WHERE licenca_id=:l", {"l": l})['c']
+    dana       = db_one("SELECT COALESCE(SUM(dana),0) as c FROM bolovanja WHERE licenca_id=:l", {"l": l})['c']
+    aktivna    = db_one("SELECT COUNT(*) as c FROM bolovanja WHERE licenca_id=:l AND datum_do>=:d", {"l": l, "d": date.today().isoformat()})['c']
+    by_sluzba  = db_fetch("""SELECT s.naziv,COALESCE(SUM(b.dana),0) as dana
+        FROM sluzbe s LEFT JOIN uposlenici u ON u.sluzba_id=s.id
+        LEFT JOIN bolovanja b ON b.uposlenik_id=u.id
+        WHERE s.licenca_id=:l GROUP BY s.id ORDER BY dana DESC""", {"l": l})
+    by_sifra   = db_fetch("""SELECT sb.sifra,sb.naziv,COALESCE(SUM(b.dana),0) as dana
+        FROM sifrarnik_bolovanja sb LEFT JOIN bolovanja b ON b.sifra=sb.sifra AND b.licenca_id=:l
+        WHERE sb.licenca_id=:l GROUP BY sb.id ORDER BY dana DESC""", {"l": l})
+    recent     = db_fetch("""SELECT u.ime||' '||u.prezime as name,s.naziv as sluzba,
+        b.datum_od,b.datum_do,b.dana,b.razlog
+        FROM bolovanja b JOIN uposlenici u ON b.uposlenik_id=u.id
+        LEFT JOIN sluzbe s ON u.sluzba_id=s.id
+        WHERE b.licenca_id=:l ORDER BY b.datum_od DESC LIMIT 8""", {"l": l})
+    return {"uposlenici": uposlenici, "bolovanja": bolovanja, "dana": dana, "aktivna": aktivna,
+            "by_sluzba": by_sluzba, "by_sifra": by_sifra, "recent": recent}
+
+@app.get("/statistike/detalji")
+def statistike_detalji(user=Depends(get_current_user)):
+    l = lid(user)
+    by_emp = db_fetch("""SELECT u.ime||' '||u.prezime as name,
+        (SELECT naziv FROM sluzbe WHERE id=u.sluzba_id) as sluzba,
+        COUNT(b.id) as slucajeva,COALESCE(SUM(b.dana),0) as dana
+        FROM uposlenici u LEFT JOIN bolovanja b ON b.uposlenik_id=u.id
+        WHERE u.licenca_id=:l AND u.status='Aktivan' GROUP BY u.id ORDER BY dana DESC""", {"l": l})
+    by_month = db_fetch("""SELECT SUBSTRING(datum_od,6,2) as mj,SUM(dana) as dana
+        FROM bolovanja WHERE licenca_id=:l AND SUBSTRING(datum_od,1,4)=:g
+        GROUP BY mj ORDER BY mj""", {"l": l, "g": str(date.today().year)})
+    by_tip = db_fetch("""SELECT t.naziv,COUNT(o.id) as zahtjeva,COALESCE(SUM(o.dana),0) as dana,
+        SUM(CASE WHEN o.status='Odobreno' THEN 1 ELSE 0 END) as odobreno
+        FROM tipovi_odsustava t LEFT JOIN odsustva o ON o.tip_id=t.id
+        WHERE t.licenca_id=:l GROUP BY t.id ORDER BY zahtjeva DESC""", {"l": l})
+    return {"by_emp": by_emp, "by_month": by_month, "by_tip": by_tip}
