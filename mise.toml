@@ -1,0 +1,3 @@
+```toml
+   [settings]
+   python.github_attestations = false
