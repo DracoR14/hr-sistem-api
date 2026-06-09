@@ -601,9 +601,7 @@ def statistike_detalji(user=Depends(get_current_user)):
         FROM tipovi_odsustava t LEFT JOIN odsustva o ON o.tip_id=t.id
         WHERE t.licenca_id=:l GROUP BY t.id ORDER BY zahtjeva DESC""", {"l": l})
     return {"by_emp": by_emp, "by_month": by_month, "by_tip": by_tip}
-
 bash
-
 cat > /mnt/user-data/outputs/shihtarica_dodaci.py << 'EOF'
 # ── DODATI NA KRAJ backend main.py ────────────────────────────────────────────
 # Kopiraj sve ispod ove linije i nalijepi na kraj main.py na GitHubu
