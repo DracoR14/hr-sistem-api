@@ -601,3 +601,173 @@ def statistike_detalji(user=Depends(get_current_user)):
         FROM tipovi_odsustava t LEFT JOIN odsustva o ON o.tip_id=t.id
         WHERE t.licenca_id=:l GROUP BY t.id ORDER BY zahtjeva DESC""", {"l": l})
     return {"by_emp": by_emp, "by_month": by_month, "by_tip": by_tip}
+
+bash
+
+cat > /mnt/user-data/outputs/shihtarica_dodaci.py << 'EOF'
+# ── DODATI NA KRAJ backend main.py ────────────────────────────────────────────
+# Kopiraj sve ispod ove linije i nalijepi na kraj main.py na GitHubu
+
+# NOVE TABELE - dodati u init_db() funkciju, nakon zadnjeg conn.commit()
+# ALI LAKŠE JE: samo dodaj ovaj endpoint koji ce sam kreirati tabele:
+
+@app.post("/admin/init-shihtarica")
+def init_shihtarica(user=Depends(get_current_user)):
+    if user['uloga'] != 'superadmin':
+        raise HTTPException(403, "Nemate pristup")
+    with engine.connect() as conn:
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS kategorije_uposlenika (
+            id SERIAL PRIMARY KEY,
+            naziv TEXT NOT NULL,
+            licenca_id INTEGER REFERENCES licence(id),
+            UNIQUE(naziv, licenca_id)
+        );
+        ALTER TABLE uposlenici ADD COLUMN IF NOT EXISTS kategorija_id INTEGER REFERENCES kategorije_uposlenika(id);
+        CREATE TABLE IF NOT EXISTS shihtarica_oznake (
+            id SERIAL PRIMARY KEY,
+            kratica TEXT NOT NULL,
+            naziv TEXT NOT NULL,
+            boja TEXT DEFAULT '#4F6EF7',
+            je_odsutnost BOOLEAN DEFAULT false,
+            racuna_sate BOOLEAN DEFAULT true,
+            licenca_id INTEGER,
+            UNIQUE(kratica, licenca_id)
+        );
+        CREATE TABLE IF NOT EXISTS shihtarica_unosi (
+            id SERIAL PRIMARY KEY,
+            uposlenik_id INTEGER REFERENCES uposlenici(id),
+            datum TEXT NOT NULL,
+            oznaka TEXT NOT NULL DEFAULT '8',
+            sati NUMERIC(5,2) DEFAULT 8.0,
+            prekovremeni NUMERIC(5,2) DEFAULT 0,
+            nocni_rad NUMERIC(5,2) DEFAULT 0,
+            pripravnost NUMERIC(5,2) DEFAULT 0,
+            rad_na_praznik NUMERIC(5,2) DEFAULT 0,
+            napomena TEXT,
+            licenca_id INTEGER REFERENCES licence(id),
+            kreirao INTEGER REFERENCES korisnici(id),
+            kreirano TIMESTAMP DEFAULT NOW(),
+            UNIQUE(uposlenik_id, datum)
+        );
+        """))
+
+        # Seed oznake za sve licence
+        licence_ids = conn.execute(text("SELECT id FROM licence")).fetchall()
+        for lic_row in licence_ids:
+            lid_val = lic_row[0]
+            for kratica, naziv, boja, je_ods, racuna in [
+                ('8',   'Radno',                       '#22C55E', False, True),
+                ('Sp',  'Sluzbeni put',                '#4F6EF7', False, True),
+                ('G',   'Godisnji odmor',              '#F59E0B', True,  False),
+                ('B',   'Bolovanje',                   '#EF4444', True,  False),
+                ('P',   'Praznik',                     '#7C3AED', True,  False),
+                ('Pl',  'Placeno odsustvo',            '#06B6D4', True,  False),
+                ('NPL', 'Neplaceno odsustvo',          '#94A3B8', True,  False),
+                ('NR',  'Nocni rad',                   '#1E40AF', False, True),
+                ('PP',  'Prekovremeni rad',            '#D97706', False, True),
+                ('RN',  'Rad nedjeljom',               '#9333EA', False, True),
+                ('RP',  'Rad na praznik',              '#DC2626', False, True),
+                ('OI',  'Odobren izlaz',               '#0891B2', True,  False),
+                ('OS',  'Ostalo',                      '#6B7280', False, False),
+            ]:
+                conn.execute(text("""
+                    INSERT INTO shihtarica_oznake(kratica,naziv,boja,je_odsutnost,racuna_sate,licenca_id)
+                    VALUES(:k,:n,:b,:j,:r,:l)
+                    ON CONFLICT DO NOTHING
+                """), {"k": kratica, "n": naziv, "b": boja, "j": je_ods, "r": racuna, "l": lid_val})
+
+            # Kategorije uposlenika
+            for naziv_kat in ['Sudac', 'Drzavni sluzbenik', 'Namjestenik']:
+                conn.execute(text("""
+                    INSERT INTO kategorije_uposlenika(naziv, licenca_id)
+                    VALUES(:n, :l) ON CONFLICT DO NOTHING
+                """), {"n": naziv_kat, "l": lid_val})
+
+        conn.commit()
+    return {"ok": True, "poruka": "Sihtarica tabele kreirane!"}
+
+
+@app.get("/kategorije")
+def get_kategorije(user=Depends(get_current_user)):
+    return db_fetch("SELECT * FROM kategorije_uposlenika WHERE licenca_id=:l ORDER BY naziv", {"l": lid(user)})
+
+@app.post("/kategorije")
+def add_kategorija(data: dict, user=Depends(get_current_user)):
+    try:
+        db_exec("INSERT INTO kategorije_uposlenika(naziv,licenca_id) VALUES(:n,:l)",
+                {"n": data.get("naziv"), "l": lid(user)})
+        return {"ok": True}
+    except:
+        raise HTTPException(400, "Naziv vec postoji")
+
+@app.get("/shihtarica/oznake")
+def get_oznake(user=Depends(get_current_user)):
+    return db_fetch("SELECT * FROM shihtarica_oznake WHERE licenca_id=:l ORDER BY kratica", {"l": lid(user)})
+
+@app.get("/shihtarica/{godina}/{mjesec}")
+def get_shihtarica(godina: int, mjesec: int, user=Depends(get_current_user)):
+    import calendar as cal
+    datum_od = f"{godina}-{mjesec:02d}-01"
+    datum_do = f"{godina}-{mjesec:02d}-31"
+
+    uposlenici = db_fetch("""
+        SELECT u.id, u.ime||' '||u.prezime as ime_prezime,
+               s.naziv as sluzba, k.naziv as kategorija,
+               u.kategorija_id, u.sluzba_id
+        FROM uposlenici u
+        LEFT JOIN sluzbe s ON u.sluzba_id=s.id
+        LEFT JOIN kategorije_uposlenika k ON u.kategorija_id=k.id
+        WHERE u.licenca_id=:l AND u.status='Aktivan'
+        ORDER BY k.naziv NULLS LAST, s.naziv, u.prezime, u.ime
+    """, {"l": lid(user)})
+
+    unosi = db_fetch("""
+        SELECT uposlenik_id, datum, oznaka, sati, prekovremeni,
+               nocni_rad, pripravnost, rad_na_praznik, napomena
+        FROM shihtarica_unosi
+        WHERE licenca_id=:l AND datum>=:od AND datum<=:do
+    """, {"l": lid(user), "od": datum_od, "do": datum_do})
+
+    unosi_map = {}
+    for u in unosi:
+        uid = u['uposlenik_id']
+        if uid not in unosi_map:
+            unosi_map[uid] = {}
+        unosi_map[uid][u['datum']] = u
+
+    _, zadnji_dan = cal.monthrange(godina, mjesec)
+    radni_dani = sum(1 for d in range(1, zadnji_dan+1)
+                     if cal.weekday(godina, mjesec, d) < 5)
+
+    return {
+        "godina": godina, "mjesec": mjesec,
+        "zadnji_dan": zadnji_dan, "radni_dani": radni_dani,
+        "uposlenici": uposlenici,
+        "unosi": {str(k): v for k, v in unosi_map.items()},
+    }
+
+@app.post("/shihtarica/unos")
+def save_unos(data: dict, user=Depends(get_current_user)):
+    db_exec("""
+        INSERT INTO shihtarica_unosi
+            (uposlenik_id,datum,oznaka,sati,prekovremeni,nocni_rad,pripravnost,rad_na_praznik,napomena,licenca_id,kreirao)
+        VALUES(:ui,:da,:oz,:sa,:pr,:no,:pp,:rp,:na,:l,:kr)
+        ON CONFLICT(uposlenik_id,datum) DO UPDATE SET
+            oznaka=EXCLUDED.oznaka, sati=EXCLUDED.sati,
+            prekovremeni=EXCLUDED.prekovremeni, nocni_rad=EXCLUDED.nocni_rad,
+            pripravnost=EXCLUDED.pripravnost, rad_na_praznik=EXCLUDED.rad_na_praznik,
+            napomena=EXCLUDED.napomena, kreirao=EXCLUDED.kreirao
+    """, {
+        "ui": data.get("uposlenik_id"), "da": data.get("datum"),
+        "oz": data.get("oznaka","8"), "sa": data.get("sati",8.0),
+        "pr": data.get("prekovremeni",0), "no": data.get("nocni_rad",0),
+        "pp": data.get("pripravnost",0), "rp": data.get("rad_na_praznik",0),
+        "na": data.get("napomena",""), "l": lid(user), "kr": user['id']
+    })
+    return {"ok": True}
+EOF
+echo "OK"
+Output
+
+OK
