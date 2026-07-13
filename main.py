@@ -878,3 +878,37 @@ def edit_licenca(lid_id: int, data: LicencaUpdateIn, user=Depends(get_current_us
     if updates:
         db_exec(f"UPDATE licence SET {','.join(updates)} WHERE id=:id", params)
     return {"ok": True}
+```python
+class LicencaUpdateIn(BaseModel):
+    firma: Optional[str] = None
+    email: Optional[str] = None
+    plan: Optional[str] = None
+    max_uposlenici: Optional[int] = None
+    datum_pocetka: Optional[str] = None
+    datum_isteka: Optional[str] = None
+    napomena: Optional[str] = None
+
+@app.put("/licence/{lid_id}/edit")
+def edit_licenca(lid_id: int, data: LicencaUpdateIn, user=Depends(get_current_user)):
+    if user['uloga'] != 'superadmin':
+        raise HTTPException(403, "Nemate pristup")
+    updates = []
+    params = {"id": lid_id}
+    if data.firma is not None:
+        updates.append("firma=:firma"); params["firma"] = data.firma
+    if data.email is not None:
+        updates.append("email=:email"); params["email"] = data.email
+    if data.plan is not None:
+        updates.append("plan=:plan"); params["plan"] = data.plan
+    if data.max_uposlenici is not None:
+        updates.append("max_uposlenici=:max_up"); params["max_up"] = data.max_uposlenici
+    if data.datum_pocetka is not None:
+        updates.append("datum_pocetka=:dp"); params["dp"] = data.datum_pocetka
+    if data.datum_isteka is not None:
+        updates.append("datum_isteka=:di"); params["di"] = data.datum_isteka
+    if data.napomena is not None:
+        updates.append("napomena=:nap"); params["nap"] = data.napomena
+    if updates:
+        db_exec(f"UPDATE licence SET {','.join(updates)} WHERE id=:id", params)
+    return {"ok": True}
+```
